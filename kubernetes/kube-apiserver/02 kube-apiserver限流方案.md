@@ -150,9 +150,9 @@ func WithMaxInFlightLimit(
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-    // 获取http请求信息
+        // 获取http请求信息
 		ctx := r.Context()
-    // 转换成kube-apiserver类型的请求
+        // 转换成kube-apiserver类型的请求
 		requestInfo, ok := apirequest.RequestInfoFrom(ctx)
 		if !ok {
 			handleError(w, r, fmt.Errorf("no RequestInfo found in context, handler chain must be wrong"))
@@ -160,7 +160,7 @@ func WithMaxInFlightLimit(
 		}
 
 		// Skip tracking long running events.
-    // 跳过longRunningRequest 什么请求是longRunningRequest， log,watch?
+        // 跳过longRunningRequest 什么请求是longRunningRequest， log,watch?
 		if longRunningRequestCheck != nil && longRunningRequestCheck(r, requestInfo) {
 			handler.ServeHTTP(w, r)
 			return
@@ -179,7 +179,7 @@ func WithMaxInFlightLimit(
 		} else {
 
 			select {
-      // 如果可以写成功，说明channel有空间，可以处理请求
+            // 如果可以写成功，说明channel有空间，可以处理请求
 			case c <- true:
 				// We note the concurrency level both while the
 				// request is being served and after it is done being
@@ -190,7 +190,7 @@ func WithMaxInFlightLimit(
 				} else {
 					watermark.recordReadOnly(len(c))
 				}
-        // 最后读取channel的值，释放channel，这样缓存channel的有效容量会加1
+				// 最后读取channel的值，释放channel，这样缓存channel的有效容量会加1
 				defer func() {
 					<-c
 					if isMutatingRequest {
@@ -202,7 +202,7 @@ func WithMaxInFlightLimit(
 				handler.ServeHTTP(w, r)
 
 			default:
-        // 如果限流，走这个逻辑，并且判断如果是system:master用户，不做限制
+                // 如果限流，走这个逻辑，并且判断如果是system:master用户，不做限制
 				// at this point we're about to return a 429, BUT not all actors should be rate limited.  A system:master is so powerful
 				// that they should always get an answer.  It's a super-admin or a loopback connection.
 				if currUser, ok := apirequest.UserFrom(ctx); ok {
@@ -213,9 +213,9 @@ func WithMaxInFlightLimit(
 						}
 					}
 				}
-        // 达到限流标准，开始限流
+				// 达到限流标准，开始限流
 				// We need to split this data between buckets used for throttling.
-        // 记录被丢弃的请求
+                // 记录被丢弃的请求
 				if isMutatingRequest {
 					metrics.DroppedRequests.WithContext(ctx).WithLabelValues(metrics.MutatingKind).Inc()
 				} else {
@@ -282,7 +282,7 @@ func BasicLongRunningRequestCheck(longRunningVerbs, longRunningSubresources sets
 
 **watch,attach,portforward,debug**类的请求和**pprof**的请求属于long-runing-request请求
 
-（2）**什么操作属于mutating类操作**
+（2）**什么操作属于非mutating类操作**
 
 ```go
 // staging/src/k8s.io/apiserver/pkg/server/filters/maxinflight.go&L50
@@ -371,9 +371,9 @@ func WithPriorityAndFairness(
 		return handler
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-    // 获取请求上下文
+        // 获取请求上下文
 		ctx := r.Context()
-    // 请求信息转换
+        // 请求信息转换
 		requestInfo, ok := apirequest.RequestInfoFrom(ctx)
 		if !ok {
 			handleError(w, r, fmt.Errorf("no RequestInfo found in context"))
@@ -384,16 +384,15 @@ func WithPriorityAndFairness(
 			handleError(w, r, fmt.Errorf("no User found in context"))
 			return
 		}
-
 		// Skip tracking long running requests.
-    // 可以看到APF同样对longRunningRequest不做限流
+        // 可以看到APF同样对longRunningRequest不做限流
 		if longRunningRequestCheck != nil && longRunningRequestCheck(r, requestInfo) {
 			klog.V(6).Infof("Serving RequestInfo=%#+v, user.Info=%#+v as longrunning\n", requestInfo, user)
 			handler.ServeHTTP(w, r)
 			return
 		}
 
-    // 声明以及初始化APF相关参数
+        // 声明以及初始化APF相关参数
 		var classification *PriorityAndFairnessClassification
 		note := func(fs *flowcontrol.FlowSchema, pl *flowcontrol.PriorityLevelConfiguration) {
 			classification = &PriorityAndFairnessClassification{
@@ -430,8 +429,8 @@ func WithPriorityAndFairness(
 			handler.ServeHTTP(w, innerReq)
 		}
 		digest := utilflowcontrol.RequestDigest{RequestInfo: requestInfo, User: user}
-    // 调用flowcontroller方法Handle处理请求
-    // 也是APF核心的限流处理流程
+        // 调用flowcontroller方法Handle处理请求
+        // 也是APF核心的限流处理流程
 		fcIfc.Handle(ctx, digest, note, func(inQueue bool) {
 			if inQueue {
 				noteWaitingDelta(1)
@@ -439,7 +438,7 @@ func WithPriorityAndFairness(
 				noteWaitingDelta(-1)
 			}
 		}, execute)
-    // 限流处理逻辑
+        // 限流处理逻辑
 		if !served {
 			setResponseHeaders(classification, w)
 
@@ -462,167 +461,87 @@ func WithPriorityAndFairness(
 
 ```Go
 func (cfgCtlr *configController) Handle(ctx context.Context, requestDigest RequestDigest,
-
    noteFn func(fs *flowcontrol.FlowSchema, pl *flowcontrol.PriorityLevelConfiguration),
-
    queueNoteFn fq.QueueNoteFn,
-
    execFn func()) {
-
    // 处理请求
-
    fs, pl, isExempt, req, startWaitingTime := cfgCtlr.startRequest(ctx, requestDigest, queueNoteFn)
-
-   
-
    queued := startWaitingTime != time.Time{}
-
    noteFn(fs, pl)
-
    if req == nil {
-
       if queued {
-
          metrics.ObserveWaitingDuration(ctx, pl.Name, fs.Name, strconv.FormatBool(req != nil), time.Since(startWaitingTime))
-
       }
-
       klog.V(7).Infof("Handle(%#+v) => fsName=%q, distMethod=%#+v, plName=%q, isExempt=%v, reject", requestDigest, fs.Name, fs.Spec.DistinguisherMethod, pl.Name, isExempt)
-
       return
-
    }
-
    ...
-
  }  
 ```
 
 startRequest：
-
 代码路径： vendor/k8s.io/apiserver/pkg/util/flowcontrol/apf_controller.go
-
 ```Go
 // startRequest classifies and, if appropriate, enqueues the request.
-
 // Returns a nil Request if and only if the request is to be rejected.
-
 // The returned bool indicates whether the request is exempt from
-
 // limitation.  The startWaitingTime is when the request started
-
 // waiting in its queue, or `Time{}` if this did not happen.
-
 func (cfgCtlr *configController) startRequest(ctx context.Context, rd RequestDigest, queueNoteFn fq.QueueNoteFn) (fs *flowcontrol.FlowSchema, pl *flowcontrol.PriorityLevelConfiguration, isExempt bool, req fq.Request, startWaitingTime time.Time) {
-
    klog.V(7).Infof("startRequest(%#+v)", rd)
-
    cfgCtlr.lock.Lock()
-
    defer cfgCtlr.lock.Unlock()
-
    var selectedFlowSchema, catchAllFlowSchema *flowcontrol.FlowSchema
-
    // 请求分类
-
    for _, fs := range cfgCtlr.flowSchemas {
-
       if matchesFlowSchema(rd, fs) {
-
          selectedFlowSchema = fs
-
          break
-
       }
-
       if fs.Name == flowcontrol.FlowSchemaNameCatchAll {
-
          catchAllFlowSchema = fs
-
       }
-
    }
-
    if selectedFlowSchema == nil {
-
       // This should never happen. If the requestDigest's User is a part of
-
       // system:authenticated or system:unauthenticated, the catch-all flow
-
       // schema should match it. However, if that invariant somehow fails,
-
       // fallback to the catch-all flow schema anyway.
-
       if catchAllFlowSchema == nil {
-
          // This should absolutely never, ever happen! APF guarantees two
-
          // undeletable flow schemas at all times: an exempt flow schema and a
-
          // catch-all flow schema.
-
          panic(fmt.Sprintf("no fallback catch-all flow schema found for request %#+v and user %#+v", rd.RequestInfo, rd.User))
-
       }
-
       selectedFlowSchema = catchAllFlowSchema
-
       klog.Warningf("no match found for request %#+v and user %#+v; selecting catchAll=%s as fallback flow schema", rd.RequestInfo, rd.User, fcfmt.Fmt(selectedFlowSchema))
-
    }
-
    plName := selectedFlowSchema.Spec.PriorityLevelConfiguration.Name
-
    // 获取对应flow流优先级信息
-
    plState := cfgCtlr.priorityLevelStates[plName]
-
    if plState.pl.Spec.Type == flowcontrol.PriorityLevelEnablementExempt {
-
       klog.V(7).Infof("startRequest(%#+v) => fsName=%q, distMethod=%#+v, plName=%q, immediate", rd, selectedFlowSchema.Name, selectedFlowSchema.Spec.DistinguisherMethod, plName)
-
       return selectedFlowSchema, plState.pl, true, immediateRequest{}, time.Time{}
-
    }
-
    var numQueues int32
-
    // queues 数量
-
    if plState.pl.Spec.Limited.LimitResponse.Type == flowcontrol.LimitResponseTypeQueue {
-
       numQueues = plState.pl.Spec.Limited.LimitResponse.Queuing.Queues
-
    }
-
    var flowDistinguisher string
-
    var hashValue uint64
-
    if numQueues > 1 {
-
       flowDistinguisher = computeFlowDistinguisher(rd, selectedFlowSchema.Spec.DistinguisherMethod)
-
       hashValue = hashFlowID(selectedFlowSchema.Name, flowDistinguisher)
-
    }
-
    // 请求入队
-
    startWaitingTime = time.Now()
-
    klog.V(7).Infof("startRequest(%#+v) => fsName=%q, distMethod=%#+v, plName=%q, numQueues=%d", rd, selectedFlowSchema.Name, selectedFlowSchema.Spec.DistinguisherMethod, plName, numQueues)
-
    req, idle := plState.queues.StartRequest(ctx, hashValue, flowDistinguisher, selectedFlowSchema.Name, rd.RequestInfo, rd.User, queueNoteFn)
-
    if idle {
-
       cfgCtlr.maybeReapLocked(plName, plState)
-
    }
-
    return selectedFlowSchema, plState.pl, false, req, startWaitingTime
-
 }
 ```
 
@@ -630,143 +549,68 @@ func (cfgCtlr *configController) startRequest(ctx context.Context, rd RequestDig
 
 ```Go
 // StartRequest begins the process of handling a request.  We take the
-
 // approach of updating the metrics about total requests queued and
-
 // executing at each point where there is a change in that quantity,
-
 // because the metrics --- and only the metrics --- track that
-
 // quantity per FlowSchema.
-
 func (qs *queueSet) StartRequest(ctx context.Context, hashValue uint64, flowDistinguisher, fsName string, descr1, descr2 interface{}, queueNoteFn fq.QueueNoteFn) (fq.Request, bool) {
-
    qs.lockAndSyncTime()
-
    defer qs.lock.Unlock()
-
    var req *request
-
-
-
    // ========================================================================
-
    // Step 0:
-
    // Apply only concurrency limit, if zero queues desired
-
    if qs.qCfg.DesiredNumQueues < 1 {
-
       if qs.totRequestsExecuting >= qs.dCfg.ConcurrencyLimit {
-
          klog.V(5).Infof("QS(%s): rejecting request %q %#+v %#+v because %d are executing and the limit is %d", qs.qCfg.Name, fsName, descr1, descr2, qs.totRequestsExecuting, qs.dCfg.ConcurrencyLimit)
-
          metrics.AddReject(ctx, qs.qCfg.Name, fsName, "concurrency-limit")
-
          return nil, qs.isIdleLocked()
-
       }
-
       req = qs.dispatchSansQueueLocked(ctx, flowDistinguisher, fsName, descr1, descr2)
-
       return req, false
-
    }
-
-
-
    // ========================================================================
-
    // Step 1:
-
    // 1) Start with shuffle sharding, to pick a queue.
-
    // 2) Reject old requests that have been waiting too long
-
    // 3) Reject current request if there is not enough concurrency shares and
-
    // we are at max queue length
-
    // 4) If not rejected, create a request and enqueue
-
    req = qs.timeoutOldRequestsAndRejectOrEnqueueLocked(ctx, hashValue, flowDistinguisher, fsName, descr1, descr2, queueNoteFn)
-
    // req == nil means that the request was rejected - no remaining
-
    // concurrency shares and at max queue length already
-
    if req == nil {
-
       klog.V(5).Infof("QS(%s): rejecting request %q %#+v %#+v due to queue full", qs.qCfg.Name, fsName, descr1, descr2)
-
       metrics.AddReject(ctx, qs.qCfg.Name, fsName, "queue-full")
-
       return nil, qs.isIdleLocked()
-
    }
-
-
-
+   
    // ========================================================================
-
    // Step 2:
-
    // The next step is to invoke the method that dequeues as much
-
    // as possible.
-
    // This method runs a loop, as long as there are non-empty
-
    // queues and the number currently executing is less than the
-
    // assured concurrency value.  The body of the loop uses the
-
    // fair queuing technique to pick a queue and dispatch a
-
    // request from that queue.
-
    qs.dispatchAsMuchAsPossibleLocked()
-
-
-
    // ========================================================================
-
    // Step 3:
-
-
-
    // Set up a relay from the context's Done channel to the world
-
    // of well-counted goroutines. We Are Told that every
-
    // request's context's Done channel gets closed by the time
-
    // the request is done being processed.
-
    doneCh := ctx.Done()
-
-
-
    // Retrieve the queueset configuration name while we have the lock
-
    // and use it in the goroutine below.
-
    configName := qs.qCfg.Name
-
-
-
    if doneCh != nil {
-
       qs.preCreateOrUnblockGoroutine()
-
       go func() {
-
          defer runtime.HandleCrash()
-
          qs.goroutineDoneOrBlocked()
-
          _ = <-doneCh
-
          // Whatever goroutine unblocked the preceding receive MUST
          // have already either (a) incremented qs.counter or (b)
          // known that said counter is not actually counting or (c)
@@ -781,8 +625,6 @@ func (qs *queueSet) StartRequest(ctx context.Context, hashValue uint64, flowDist
    return req, false
 }
 ```
-
-
 
 ```Go
 // timeoutOldRequestsAndRejectOrEnqueueLocked -->
@@ -799,19 +641,12 @@ func (qs *queueSet) chooseQueueIndexLocked(hashValue uint64, descr1, descr2 inte
    qs.dealer.Deal(hashValue, func(queueIdx int) {
       thisLen := len(qs.queues[queueIdx].requests)
       klog.V(7).Infof("QS(%s): For request %#+v %#+v considering queue %d of length %d", qs.qCfg.Name, descr1, descr2, queueIdx, thisLen)
-
       if thisLen < bestQueueLen {
-
          bestQueueIdx, bestQueueLen = queueIdx, thisLen
-
       }
-
    })
-
    klog.V(6).Infof("QS(%s) at r=%s v=%.9fs: For request %#+v %#+v chose queue %d, had %d waiting & %d executing", qs.qCfg.Name, qs.clock.Now().Format(nsTimeFmt), qs.virtualTime, descr1, descr2, bestQueueIdx, bestQueueLen, qs.queues[bestQueueIdx].requestsExecuting)
-
    return bestQueueIdx
-
 }
 ```
 
@@ -837,51 +672,29 @@ flowcontroller声明：
 
 ```Go
 // Interface defines how the API Priority and Fairness filter interacts with the underlying system.
-
 type Interface interface {
-
    // Handle takes care of queuing and dispatching a request
-
    // characterized by the given digest.  The given `noteFn` will be
-
    // invoked with the results of request classification.  If the
-
    // request is queued then `queueNoteFn` will be called twice,
-
    // first with `true` and then with `false`; otherwise
-
    // `queueNoteFn` will not be called at all.  If Handle decides
-
    // that the request should be executed then `execute()` will be
-
    // invoked once to execute the request; otherwise `execute()` will
-
    // not be invoked.
-
    Handle(ctx context.Context,
-
       requestDigest RequestDigest,
-
       noteFn func(fs *flowcontrol.FlowSchema, pl *flowcontrol.PriorityLevelConfiguration),
-
       queueNoteFn fq.QueueNoteFn,
-
       execFn func(),
-
    )
    // MaintainObservations is a helper for maintaining statistics.
-
    MaintainObservations(stopCh <-chan struct{})
-
    // Run monitors config objects from the main apiservers and causes
-
    // any needed changes to local behavior.  This method ceases
-
    // activity and returns after the given channel is closed.
-
    Run(stopCh <-chan struct{}) error
    // Install installs debugging endpoints to the web-server.
-
    Install(c *mux.PathRecorderMux)
 
 }
