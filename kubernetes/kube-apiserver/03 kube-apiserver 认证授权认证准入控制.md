@@ -1,4 +1,4 @@
-# 【k8s源码阅读】 kube-apiserver 认证 授权
+# 【k8s源码阅读】 kube-apiserver 认证 授权 准入控制
 
 >  源码地址：git@github.com:kubernetes/kubernetes.git
 > version: 1.21.3
@@ -8,6 +8,10 @@
 ![apiserver请求流程](../../images/a0375692-effe-44fc-8ed1-65cf927c63f5.png)
 
 从apiserver访问流程看，kube-apiserver作为kubernetes集群请求入口，接收客户端以及组件的请求，每一个请求都需要经过访问控制层Authentication(认证)，Authorization(授权)、Admission controller(准入控制)才能真正操作kubernetes资源。
+
+> 访问控制层官网介绍：https://kubernetes.io/zh-cn/docs/concepts/security/controlling-access/
+>
+> 更多值得阅读的是关于认证授权准入控制的介绍：https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/authentication/
 
 
 
@@ -654,7 +658,567 @@ func (r *RBACAuthorizer) Authorize(ctx context.Context, requestAttributes author
 
 ## 3. Admission controller
 
+>  准入控制介绍：https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/admission-controllers/
 
+**准入控制配置：**
+
+代码路径：pkg/kubeapiserver/options/admission.go（调用链就不贴了）
+
+```go
+func NewAdmissionOptions() *AdmissionOptions {
+  // 初始化参数。同时也会注册lifecycle、validatingwebhook、mutatingwebhook准入插件
+	options := genericoptions.NewAdmissionOptions()
+	// register all admission plugins
+  // 注册所有准入控制插件
+	RegisterAllAdmissionPlugins(options.Plugins)
+	// set RecommendedPluginOrder
+  // 准入控制执行顺序
+	options.RecommendedPluginOrder = AllOrderedPlugins
+	// set DefaultOffPlugins
+  // 关闭的准入控制列表
+	options.DefaultOffPlugins = DefaultOffAdmissionPlugins()
+
+	return &AdmissionOptions{
+		GenericAdmission: options,
+	}
+}
+```
+
+代码路径：pkg/kubeapiserver/options/plugins.go
+
+```go 
+// RegisterAllAdmissionPlugins registers all admission plugins and
+// sets the recommended plugins order.
+// 默认注册的准入控制
+func RegisterAllAdmissionPlugins(plugins *admission.Plugins) {
+	admit.Register(plugins) // DEPRECATED as no real meaning 废弃的准入控制器
+	alwayspullimages.Register(plugins)
+	antiaffinity.Register(plugins)
+	defaulttolerationseconds.Register(plugins)
+	defaultingressclass.Register(plugins)
+	denyserviceexternalips.Register(plugins)
+	deny.Register(plugins) // DEPRECATED as no real meaning
+	eventratelimit.Register(plugins)
+	extendedresourcetoleration.Register(plugins)
+	gc.Register(plugins)
+	imagepolicy.Register(plugins)
+	limitranger.Register(plugins)
+	autoprovision.Register(plugins)
+	exists.Register(plugins)
+	noderestriction.Register(plugins)
+	nodetaint.Register(plugins)
+	label.Register(plugins) // DEPRECATED, future PVs should not rely on labels for zone topology
+	podnodeselector.Register(plugins)
+	podtolerationrestriction.Register(plugins)
+	runtimeclass.Register(plugins)
+	resourcequota.Register(plugins)
+	podsecuritypolicy.Register(plugins)
+	podpriority.Register(plugins)
+	scdeny.Register(plugins)
+	serviceaccount.Register(plugins)
+	setdefault.Register(plugins)
+	resize.Register(plugins)
+	storageobjectinuseprotection.Register(plugins)
+	certapproval.Register(plugins)
+	certsigning.Register(plugins)
+	certsubjectrestriction.Register(plugins)
+}
+```
+
+**准入控制接口定义：**
+
+代码路径：vendor/k8s.io/apiserver/pkg/admission/interfaces.go
+
+```go
+// Interface is an abstract, pluggable interface for Admission Control decisions.
+type Interface interface {
+	// Handles returns true if this admission controller can handle the given operation
+	// where operation can be one of CREATE, UPDATE, DELETE, or CONNECT
+	Handles(operation Operation) bool
+}
+
+type MutationInterface interface {
+	Interface
+
+	// Admit makes an admission decision based on the request attributes.
+	// Context is used only for timeout/deadline/cancellation and tracing information.
+	Admit(ctx context.Context, a Attributes, o ObjectInterfaces) (err error)
+}
+
+// ValidationInterface is an abstract, pluggable interface for Admission Control decisions.
+type ValidationInterface interface {
+	Interface
+
+	// Validate makes an admission decision based on the request attributes.  It is NOT allowed to mutate
+	// Context is used only for timeout/deadline/cancellation and tracing information.
+	Validate(ctx context.Context, a Attributes, o ObjectInterfaces) (err error)
+}
+```
+
+这里为准入控制定义了一个接口，Interface、Handles方法定义是处理操作，处理成功返回true。MutationInterface，ValidationInterface都组合了Interface接口。
+
+其中
+
+MutationInterface、Admit方法根据请求的属性做出准入决策（都是翻译了注释）。其实就是对请求资源做修改操作（个人理解）
+
+ValidationInterface、Validate方法对请求属性做校验
+
+所有的准入控制器需要实现MutationInterface、ValidationInterface其中一个，也可以两个都实现（两个都实现执行顺序是先修改在校验）。
+
+还提供其他接口：
+
+- type Attributes interface. 获取请求属性接口
+- type ObjectInterfaces interface 获取对象类型接口
+- privateAnnotationsGetter interface  根据属性获取注解接口
+
+- type ConfigProvider interface 根据插件名称获取配置接口
+
+
+
+代码路径：vendor/k8s.io/apiserver/pkg/admission/plugins.go
+
+```go
+// Factory is a function that returns an Interface for admission decisions.
+// The config parameter provides an io.Reader handler to the factory in
+// order to load specific configurations. If no configuration is provided
+// the parameter is nil.
+type Factory func(config io.Reader) (Interface, error)
+
+type Plugins struct {
+	lock     sync.Mutex
+	registry map[string]Factory
+}
+
+func NewPlugins() *Plugins {
+	return &Plugins{}
+}
+```
+
+定义准入控制器插件集合，通过注册将所有插件存储registry
+
+- func (ps *Plugins) NewFromPlugins
+
+  将所有控制器集合成一个chainAdmissionHandler（是准入控制器的集合，同时实现准入控制接口）
+
+代码路径：vendor/k8s.io/apiserver/pkg/admission/chain.go
+
+```go
+// chainAdmissionHandler is an instance of admission.NamedHandler that performs admission control using
+// a chain of admission handlers
+type chainAdmissionHandler []Interface
+
+// NewChainHandler creates a new chain handler from an array of handlers. Used for testing.
+func NewChainHandler(handlers ...Interface) chainAdmissionHandler {
+	return chainAdmissionHandler(handlers)
+}
+
+// Admit performs an admission control check using a chain of handlers, and returns immediately on first error
+func (admissionHandler chainAdmissionHandler) Admit(ctx context.Context, a Attributes, o ObjectInterfaces) error {
+	for _, handler := range admissionHandler {
+		if !handler.Handles(a.GetOperation()) {
+			continue
+		}
+		if mutator, ok := handler.(MutationInterface); ok {
+			err := mutator.Admit(ctx, a, o)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+...
+func (admissionHandler chainAdmissionHandler) Validate(
+  ...
+  
+func (admissionHandler chainAdmissionHandler) Handles(
+  ...
+```
+
+**默认准入控制器实现：**
+
+代码路径：plugin/pkg/admission（这个目录下有所有准入控制器的实现）
+
+plugin/pkg/admission/alwayspullimages/admission.go
+
+>该准入控制器会修改每个新创建的 Pod，将其镜像拉取策略设置为 Always。 这在多租户集群中是有用的，这样用户就可以放心，他们的私有镜像只能被那些有凭证的人使用。 如果没有这个准入控制器，一旦镜像被拉取到节点上，任何用户的 Pod 都可以通过已了解到的镜像的名称 （假设 Pod 被调度到正确的节点上）来使用它，而不需要对镜像进行任何鉴权检查。 启用这个准入控制器之后，启动容器之前必须拉取镜像，这意味着需要有效的凭证。
+
+```go
+// PluginName indicates name of admission plugin.
+const PluginName = "AlwaysPullImages"
+
+// Register registers a plugin
+func Register(plugins *admission.Plugins) {
+	plugins.Register(PluginName, func(config io.Reader) (admission.Interface, error) {
+		return NewAlwaysPullImages(), nil
+	})
+}
+// AlwaysPullImages is an implementation of admission.Interface.
+// It looks at all new pods and overrides each container's image pull policy to Always.
+type AlwaysPullImages struct {
+	*admission.Handler
+}
+
+// 定义不使用的变量 目的确保AlwaysPullImages 实现了MutationInterface，ValidationInterface接口
+var _ admission.MutationInterface = &AlwaysPullImages{}
+var _ admission.ValidationInterface = &AlwaysPullImages{}
+
+// Admit makes an admission decision based on the request attributes
+func (a *AlwaysPullImages) Admit(ctx context.Context, attributes admission.Attributes, o admission.ObjectInterfaces) (err error) {
+	// Ignore all calls to subresources or resources other than pods.
+  // 根据请求属性判断是否忽略请求，需要准入控制器根据自己需求判断是否忽略
+  // shouldIgnore自定义
+	if shouldIgnore(attributes) {
+		return nil
+	}
+	pod, ok := attributes.GetObject().(*api.Pod)
+	if !ok {
+		return apierrors.NewBadRequest("Resource was marked with kind Pod but was unable to be converted")
+	}
+  //  修改ImagePullPolicy
+	pods.VisitContainersWithPath(&pod.Spec, field.NewPath("spec"), func(c *api.Container, _ *field.Path) bool {
+		c.ImagePullPolicy = api.PullAlways
+		return true
+	})
+
+	return nil
+}
+
+// Validate makes sure that all containers are set to always pull images
+// 校验确保所有容器镜像拉取策略为
+func (*AlwaysPullImages) Validate(ctx context.Context, attributes admission.Attributes, o admission.ObjectInterfaces) (err error) {
+	if shouldIgnore(attributes) {
+		return nil
+	}
+
+	pod, ok := attributes.GetObject().(*api.Pod)
+	if !ok {
+		return apierrors.NewBadRequest("Resource was marked with kind Pod but was unable to be converted")
+	}
+
+	var allErrs []error
+	pods.VisitContainersWithPath(&pod.Spec, field.NewPath("spec"), func(c *api.Container, p *field.Path) bool {
+		if c.ImagePullPolicy != api.PullAlways {
+			allErrs = append(allErrs, admission.NewForbidden(attributes,
+				field.NotSupported(p.Child("imagePullPolicy"), c.ImagePullPolicy, []string{string(api.PullAlways)}),
+			))
+		}
+		return true
+	})
+	if len(allErrs) > 0 {
+		return utilerrors.NewAggregate(allErrs)
+	}
+
+	return nil
+}
+
+// check if it's update and it doesn't change the images referenced by the pod spec
+func isUpdateWithNoNewImages(attributes admission.Attributes) bool {
+	if attributes.GetOperation() != admission.Update {
+		return false
+	}
+
+	pod, ok := attributes.GetObject().(*api.Pod)
+	if !ok {
+		klog.Warningf("Resource was marked with kind Pod but pod was unable to be converted.")
+		return false
+	}
+
+	oldPod, ok := attributes.GetOldObject().(*api.Pod)
+	if !ok {
+		klog.Warningf("Resource was marked with kind Pod but old pod was unable to be converted.")
+		return false
+	}
+
+	oldImages := sets.NewString()
+	pods.VisitContainersWithPath(&oldPod.Spec, field.NewPath("spec"), func(c *api.Container, _ *field.Path) bool {
+		oldImages.Insert(c.Image)
+		return true
+	})
+
+	hasNewImage := false
+	pods.VisitContainersWithPath(&pod.Spec, field.NewPath("spec"), func(c *api.Container, _ *field.Path) bool {
+		if !oldImages.Has(c.Image) {
+			hasNewImage = true
+		}
+		return !hasNewImage
+	})
+	return !hasNewImage
+}
+
+func shouldIgnore(attributes admission.Attributes) bool {
+	// Ignore all calls to subresources or resources other than pods.
+	if len(attributes.GetSubresource()) != 0 || attributes.GetResource().GroupResource() != api.Resource("pods") {
+		return true
+	}
+
+	if isUpdateWithNoNewImages(attributes) {
+		return true
+	}
+	return false
+}
+
+// NewAlwaysPullImages creates a new always pull images admission control handler
+func NewAlwaysPullImages() *AlwaysPullImages {
+	return &AlwaysPullImages{
+		Handler: admission.NewHandler(admission.Create, admission.Update),
+	}
+}
+```
+
+### 准入控制调用：
+
+> 举例：创建操作，准入控制的调用
+
+```YAML
+registerResourceHandlers
+--> restfulCreateResource
+    --> handlers.CreateResource
+        --> createHandler
+func createHandler(r rest.NamedCreater, scope *RequestScope, admit admission.Interface, includeName bool) http.HandlerFunc {
+   return func(w http.ResponseWriter, req *http.Request) {
+      // For performance tracking purposes.
+      trace := utiltrace.New("Create", traceFields(req)...)
+      defer trace.LogIfLong(500 * time.Millisecond)
+      ...
+      options := &metav1.CreateOptions{}
+      ... 
+      // 获取准入控制器
+      admit = admission.WithAudit(admit, ae)
+      audit.LogRequestObject(ae, obj, scope.Resource, scope.Subresource, scope.Serializer)
+      userInfo, _ := request.UserFrom(ctx)
+      trace.Step("About to store object in database")
+      // 准入控制器属性
+      admissionAttributes := admission.NewAttributesRecord(obj, nil, scope.Kind, namespace, name, scope.Resource, scope.Subresource, admission.Create, options, dryrun.IsDryRun(options.DryRun), userInfo)
+      // 定义创建请求
+      requestFunc := func() (runtime.Object, error) {
+         return r.Create(
+            ctx,
+            name,
+            obj,
+            // 这里会执行校验的准入控制
+            rest.AdmissionToValidateObjectFunc(admit, admissionAttributes, scope),
+            options,
+         )
+      }
+      // Dedup owner references before updating managed fields
+      dedupOwnerReferencesAndAddWarning(obj, req.Context(), false)
+      result, err := finishRequest(ctx, func() (runtime.Object, error) {
+         if scope.FieldManager != nil {
+            liveObj, err := scope.Creater.New(scope.Kind)
+            if err != nil {
+               return nil, fmt.Errorf("failed to create new object (Create for %v): %v", scope.Kind, err)
+            }
+            obj = scope.FieldManager.UpdateNoErrors(liveObj, obj, managerOrUserAgent(options.FieldManager, req.UserAgent()))
+            admit = fieldmanager.NewManagedFieldsValidatingAdmissionController(admit)
+         }
+         // 执行修改类型的准入控制
+         if mutatingAdmission, ok := admit.(admission.MutationInterface); ok && mutatingAdmission.Handles(admission.Create) {
+            if err := mutatingAdmission.Admit(ctx, admissionAttributes, scope); err != nil {
+               return nil, err
+            }
+         }
+      ...
+      trace.Step("Object stored in database")
+      code := http.StatusCreated
+      status, ok := result.(*metav1.Status)
+      if ok && err == nil && status.Code == 0 {
+         status.Code = int32(code)
+      }
+      transformResponseObject(ctx, scope, trace, req, w, code, outputMediaType, result)
+   }
+}
+```
+
+### 准入WebHook：
+
+> https://kubernetes.io/zh-cn/docs/reference/access-authn-authz/extensible-admission-controllers/
+
+> 扩展动态控制器介绍
+
+准入控制器中有两个特殊的控制器：
+
+- MutatingAdmissionWebhook
+- ValidatingAdmissionWebhook
+
+准入 Webhook 是一种用于接收准入请求并对其进行处理的 HTTP 回调机制
+
+代码路径：vendor/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/plugin.go
+
+```Go
+// Plugin is an implementation of admission.Interface.
+// MutatingAdmissionWebhook 插件定义，ValidatingAdmissionWebhook相同
+type Plugin struct {
+   *generic.Webhook
+}
+var _ admission.MutationInterface = &Plugin{}
+// NewMutatingWebhook returns a generic admission webhook plugin.
+// 初始化
+func NewMutatingWebhook(configFile io.Reader) (*Plugin, error) {
+   handler := admission.NewHandler(admission.Connect, admission.Create, admission.Delete, admission.Update)
+   p := &Plugin{}
+   var err error
+   p.Webhook, err = generic.NewWebhook(handler, configFile, configuration.NewMutatingWebhookConfigurationManager, newMutatingDispatcher(p))
+   if err != nil {
+      return nil, err
+   }
+   return p, nil
+}
+
+// ValidateInitialization implements the InitializationValidator interface.
+// 插件参数校验，与准入控制的校验不同。这里是检查相关组件是否就绪
+func (a *Plugin) ValidateInitialization() error {
+   if err := a.Webhook.ValidateInitialization(); err != nil {
+      return err
+   }
+   return nil
+}
+// Admit makes an admission decision based on the request attributes.
+// 变更实现
+func (a *Plugin) Admit(ctx context.Context, attr admission.Attributes, o admission.ObjectInterfaces) error {
+   return a.Webhook.Dispatch(ctx, attr, o)
+}
+```
+
+准入Webhook共同的属性`generic.Webhook`
+
+代码路径：k8s.io/apiserver/pkg/admission/plugin/webhook/generic/webhook.go
+
+```SQL
+// Webhook is an abstract admission plugin with all the infrastructure to define Admit or Validate on-top.
+type Webhook struct {
+   *admission.Handler
+   sourceFactory sourceFactory
+   hookSource       Source
+   clientManager    *webhookutil.ClientManager
+   namespaceMatcher *namespace.Matcher
+   objectMatcher    *object.Matcher
+   dispatcher       Dispatcher
+}
+...
+...
+// Dispatch is called by the downstream Validate or Admit methods.
+// 当执行Validate or Admit方法时都会调用这个webhook Dispatch
+func (a *Webhook) Dispatch(ctx context.Context, attr admission.Attributes, o admission.ObjectInterfaces) error {
+   // 判断请求是否为WebhookConfiguration类型
+   if rules.IsWebhookConfigurationResource(attr) {
+      return nil
+   }
+   // 判断是否就绪
+   if !a.WaitForReady() {
+      return admission.NewForbidden(attr, fmt.Errorf("not yet ready to handle request"))
+   }
+   // 动态加载hooks
+   hooks := a.hookSource.Webhooks()
+   // 分发请求
+   return a.dispatcher.Dispatch(ctx, attr, o, hooks)
+}
+```
+
+Dispatcher: 将请求分发给所有加载的webhooks。返回非空则是拒绝请求
+
+```Go
+// Dispatcher dispatches webhook call to a list of webhooks with admission attributes as argument.
+type Dispatcher interface {
+   // Dispatch a request to the webhooks. Dispatcher may choose not to
+   // call a hook, either because the rules of the hook does not match, or
+   // the namespaceSelector or the objectSelector of the hook does not
+   // match. A non-nil error means the request is rejected.
+   Dispatch(ctx context.Context, a admission.Attributes, o admission.ObjectInterfaces, hooks []webhook.WebhookAccessor) error
+}
+```
+
+代码路径： k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go
+
+```Go
+// 分发webhooks实现
+func (a *mutatingDispatcher) Dispatch(ctx context.Context, attr admission.Attributes, o admission.ObjectInterfaces, hooks []webhook.WebhookAccessor) error {
+   reinvokeCtx := attr.GetReinvocationContext()
+   // 遍历还在到的相关webhooks
+   for i, hook := range hooks {
+      attrForCheck := attr
+      if versionedAttr != nil {
+         attrForCheck = versionedAttr
+      }
+      // 调用插件的ShouldCallHook方法,根据规则，namesapce，策略
+      // 判断是否调用webhook
+      invocation, statusErr := a.plugin.ShouldCallHook(hook, attrForCheck, o)
+      if statusErr != nil {
+         return statusErr
+      }
+      if invocation == nil {
+         continue
+      }
+      // 返回对应的webhook struct
+      hook, ok := invocation.Webhook.GetMutatingWebhook()
+      if !ok {
+         return fmt.Errorf("mutating webhook dispatch requires v1.MutatingWebhook, but got %T", hook)
+      }
+      ...
+      t := time.Now()
+      ...
+      // 开始调用 返回是否已经完成修改以及err信息
+      changed, err := a.callAttrMutatingHook(ctx, hook, invocation, versionedAttr, o, round, i)
+      // 处理changed, err
+      ignoreClientCallFailures := hook.FailurePolicy != nil && *hook.FailurePolicy == admissionregistrationv1.Ignore
+      rejected := false
+      if err != nil {
+         switch err := err.(type) {
+         case *webhookutil.ErrCallingWebhook:
+            if !ignoreClientCallFailures {
+               rejected = true
+               admissionmetrics.Metrics.ObserveWebhookRejection(ctx, hook.Name, "admit", string(versionedAttr.Attributes.GetOperation()), admissionmetrics.WebhookRejectionCallingWebhookError, 0)
+            }
+         case *webhookutil.ErrWebhookRejection:
+          ...
+         default:
+          ...
+         }
+      }
+      admissionmetrics.Metrics.ObserveWebhook(ctx, time.Since(t), rejected, versionedAttr.Attributes, "admit", hook.Name)
+   ...
+   return nil
+}
+```
+
+callAttrMutatingHook：发起请求
+
+```Go
+func (a *mutatingDispatcher) callAttrMutatingHook(ctx context.Context, h *admissionregistrationv1.MutatingWebhook, invocation *generic.WebhookInvocation, attr *generic.VersionedAttributes, o admission.ObjectInterfaces, round, idx int) (bool, error) {
+   // 
+   configurationName := invocation.Webhook.GetConfigurationName()
+   annotator := newWebhookAnnotator(attr, round, idx, h.Name, configurationName)
+   changed := false
+   defer func() { annotator.addMutationAnnotation(changed) }()
+   ...
+   // 获取请求参数request，以及response初始化，作为请求后存储response
+   uid, request, response, err := webhookrequest.CreateAdmissionObjects(attr, invocation)
+   // Make the webhook request
+   // http client
+   client, err := invocation.Webhook.GetRESTClient(a.cm)
+   if err != nil {
+      return false, &webhookutil.ErrCallingWebhook{WebhookName: h.Name, Reason: err}
+   }
+   // if the webhook has a specific timeout, wrap the context to apply it
+   // 判断请求是否超时
+   if h.TimeoutSeconds != nil {
+      var cancel context.CancelFunc
+      ctx, cancel = context.WithTimeout(ctx, time.Duration(*h.TimeoutSeconds)*time.Second)
+      defer cancel()
+   }
+   // 制作http请求
+   r := client.Post().Body(request)
+...
+   // 发起请求，并将响应注入response
+   if err := r.Do(ctx).Into(response); err != nil {
+      return false, &webhookutil.ErrCallingWebhook{WebhookName: h.Name, Reason: err}
+   }
+   trace.Step("Request completed")
+   ...
+   ...
+   return changed, nil
+}
+```
 
 
 
