@@ -1,4 +1,4 @@
-# 【k8s源码阅读】 kubelet  pod manager
+# 【k8s源码阅读】 kubelet  volumeManager
 
 Kubelet volumeManager流程分析
 
@@ -85,7 +85,7 @@ type VolumeManager interface {
 
 ### **volumeManager struct：**
 
-```Rust
+```go
 // volumeManager implements the VolumeManager interface
 // 实现VolumeManager接口的volumeManager结构体
 type volumeManager struct {
@@ -150,7 +150,7 @@ type volumeManager struct {
 
 - VolumePluginMgr
 
-```Haskell
+```go
 type VolumePluginMgr struct {
    // 读写锁
    mutex                     sync.RWMutex
