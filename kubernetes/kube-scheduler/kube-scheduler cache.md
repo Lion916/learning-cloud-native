@@ -633,3 +633,4 @@ func (cache *schedulerCache) updateNodeInfoSnapshotList(snapshot *Snapshot, upda
 ```
 
 上面总结中描述了kube-scheduler大致调度一个Pod的流程，其实kube-scheduler调度一个Pod的流程非常复杂，此处为了方便理解Cache在kube-scheduler中的位置和作用，剧透了部分内容。笔者会在后续文章中详细解析kube-scheduler调度Pod的详细流程。
+
